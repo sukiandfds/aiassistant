@@ -20,7 +20,7 @@ const tools = [{
 // 这是Vercel处理请求的函数
 module.exports = async (req, res) => {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash", tools: tools });
+        const model = genAI.getGenerativeModel({ model: gemini-2.5-flash, tools: tools });
         const chat = model.startChat();
         const result = await chat.sendMessage("东京的天气怎么样？");
         
