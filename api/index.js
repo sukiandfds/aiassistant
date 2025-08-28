@@ -1,72 +1,66 @@
-// 导入我们需要的所有工具库
+const lark = require('@larksuite/oapi');
 const { createClient } = require('@supabase/supabase-js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-// --- 初始化 Supabase 客户端 ---
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
-
-// --- 初始化 Gemini AI 客户端 ---
+// --- 初始化所有客户端 ---
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" }); // 我们现在暂时不需要工具调用
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const feishuClient = new lark.Client({
+    appId: process.env.FEISHU_APP_ID,
+    appSecret: process.env.FEISHU_APP_SECRET,
+});
 
 // --- Vercel 主处理函数 ---
 module.exports = async (req, res) => {
-    // 飞书的 Webhook 验证流程
-    // 当您在飞书后台配置 URL 时，飞书会发送一个包含 "challenge" 字段的请求来验证URL的有效性
+    // 飞书的 Webhook 验证
     if (req.body && req.body.challenge) {
-        console.log("接收到飞书的 URL 验证请求");
         return res.status(200).json({ challenge: req.body.challenge });
+    }
+
+    // 确保这是一个飞书事件回调
+    if (!(req.body && req.body.header && req.body.header.event_type === 'im.message.receive_v1')) {
+        return res.status(200).send("事件类型不是 im.message.receive_v1，已忽略。");
     }
 
     // --- 主逻辑开始 ---
     try {
-        // 在真实场景中，我们会从 req.body 中解析飞书发来的用户消息
-        // 为了测试，我们先写死一个用户问题
-        const userMessage = "你好，请根据我的背景资料，总结一下我的工作模式。";
-        console.log(`收到的模拟用户消息: ${userMessage}`);
+        const event = req.body.event;
+        const message = JSON.parse(event.message.content);
+        const userMessage = message.text.trim();
+        const openId = event.sender.sender_id.open_id; // 获取用户的 open_id
 
-        // 1. 从 Supabase 读取用户的长期记忆
+        // 1. 从 Supabase 读取该用户的长期记忆
         const { data: memories, error } = await supabase
             .from('long_term_memories')
-            .select('content'); // 我们只选择 content 字段
+            .select('content')
+            .eq('user_id', openId); // **重要：只读取这个用户的数据**
 
-        if (error) {
-            throw new Error(`读取 Supabase 数据失败: ${error.message}`);
-        }
-
-        // 将记忆内容格式化成一个简单的字符串
+        if (error) throw new Error(`读取 Supabase 失败: ${error.message}`);
         const memoryContext = memories.map(m => m.content).join('\n');
-        console.log(`从数据库中提取的上下文: ${memoryContext}`);
 
-        // 2. 构建给 AI 的指令 (Prompt)
-        const prompt = `
-            这是关于用户的一些背景资料：
-            ---
-            ${memoryContext}
-            ---
-            现在，请根据以上背景资料，回答用户的问题。
-            用户问题: "${userMessage}"
-        `;
-        console.log("构建的最终 Prompt:", prompt);
+        // 2. 构建 Prompt
+        const prompt = `背景资料:\n---\n${memoryContext}\n---\n用户问题: "${userMessage}"`;
 
-        // 3. 调用 Gemini AI 生成回答
+        // 3. 调用 Gemini 生成回答
         const result = await model.generateContent(prompt);
         const aiResponse = await result.response.text();
-        console.log(`Gemini 生成的回答: ${aiResponse}`);
         
-        // 4. 将 AI 的回答返回
-        // 在真实场景中，这里会是调用飞书 API 将消息发回给用户
-        // 为了测试，我们先直接在页面上显示结果
-        res.status(200).json({
-            user_message: userMessage,
-            memory_context: memoryContext,
-            ai_response: aiResponse
+        // 4. 通过飞书 API 回复消息
+        await feishuClient.im.message.reply({
+            path: { message_id: event.message.message_id },
+            data: {
+                content: JSON.stringify({ text: aiResponse }),
+                msg_type: 'text',
+            },
         });
+
+        // 告诉飞书服务器我们已成功处理
+        res.status(200).send("处理成功");
 
     } catch (error) {
         console.error("函数运行时捕获到错误:", error);
-        res.status(500).json({ error: `函数运行时捕获到错误: ${error.message}` });
+        // 即使出错，也回复200，避免飞书重试
+        res.status(200).json({ error: `函数运行时捕获到错误: ${error.message}` });
     }
 };
