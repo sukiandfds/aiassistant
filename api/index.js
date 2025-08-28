@@ -1,72 +1,48 @@
-// 导入Gemini库
+// 导入我们需要的两个工具库
+const { createClient } = require('@supabase/supabase-js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-// 从环境变量中获取API密钥
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-// 定义我们的“天气”工具
-const tools = [{
-    functionDeclarations: [{
-        name: "get_weather",
-        description: "获取特定地点的天气",
-        parameters: {
-            type: "OBJECT",
-            properties: { location: { type: "STRING", description: "城市名" } },
-            required: ["location"],
-        },
-    }],
-}];
-
-// 这是Vercel处理请求的函数
+// 这是Vercel处理所有请求的函数
 module.exports = async (req, res) => {
     try {
-        // 检查API密钥是否存在
-        if (!process.env.GEMINI_API_KEY) {
-            throw new Error("GEMINI_API_KEY 环境变量未设置！");
+        // --- 第1部分：连接到 Supabase 数据库 ---
+
+        // 从环境变量中获取 Supabase 的地址和钥匙
+        const supabaseUrl = process.env.SUPABASE_URL;
+        const supabaseKey = process.env.SUPABASE_ANON_KEY;
+
+        // 检查地址和钥匙是否存在
+        if (!supabaseUrl || !supabaseKey) {
+            throw new Error("Supabase URL 或 Key 未在环境变量中设置！");
         }
 
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash", tools: tools });
-        const chat = model.startChat();
-        const result = await chat.sendMessage("东京的天气怎么样？");
-        
-        // --- 开始进行更安全的检查 ---
-        const functionCalls = result.response.functionCalls();
+        // 创建一个 Supabase 客户端实例
+        const supabase = createClient(supabaseUrl, supabaseKey);
 
-        if (functionCalls && functionCalls.length > 0) {
-            const call = functionCalls[0];
-            
-            if (call.name === "get_weather") {
-                // 成功了！AI想要调用我们的工具
-                // 我们直接返回一个固定的“晴天”结果
-                const apiResponse = {
-                    functionResponse: {
-                        name: "get_weather",
-                        response: { name: "get_weather", content: { weather: "晴天" } },
-                    }
-                };
-                
-                // 把“晴天”的结果喂回给AI
-                const result2 = await chat.sendMessage([apiResponse]);
-                const finalResponse = result2.response.text();
+        // --- 第2部分：从数据库读取数据 ---
 
-                // 将AI最终的回答发送给用户
-                res.status(200).send(`验证成功！AI的回答是: "${finalResponse}"`);
-            } else {
-                // AI调用了我们不认识的工具
-                res.status(500).send(`验证失败：AI调用了未知的工具: ${call.name}`);
-            }
-        } else {
-            // --- 这是关键的新增部分 ---
-            // AI没有调用任何工具，而是直接给出了回答
-            const modelResponseText = result.response.text();
-            res.status(500).send(`验证失败：AI没有调用工具，而是直接回答: "${modelResponseText}"`);
+        // 尝试从 'long_term_memories' 表中读取所有数据
+        const { data, error } = await supabase
+            .from('long_term_memories')
+            .select('*');
+
+        // 如果读取过程中发生错误，就抛出错误
+        if (error) {
+            throw new Error(`读取 Supabase 数据失败: ${error.message}`);
         }
-        // --- 安全检查结束 ---
+
+        // --- 第3部分：将结果返回给用户 ---
+
+        // 将我们从数据库中读取到的数据（JSON格式）发送回浏览器页面
+        // `JSON.stringify(data, null, 2)` 是为了让数据显示得更整齐好看
+        res.status(200).json({
+            message: "成功从 Supabase 读取数据！",
+            data: data
+        });
 
     } catch (error) {
-        // 将详细错误打印到Vercel的日志中，方便我们查看
-        console.error("函数运行时捕获到错误:", error); 
-        // 向用户返回一个清晰的错误信息
+        // 如果中间任何一步出错了，就打印错误日志，并返回错误信息
+        console.error("函数运行时捕获到错误:", error);
         res.status(500).send(`函数运行时捕获到错误: ${error.message}`);
     }
 };
